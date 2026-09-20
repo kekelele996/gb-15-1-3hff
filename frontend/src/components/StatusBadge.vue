@@ -48,6 +48,7 @@ const tagType = computed(() => {
     case 'submitted':
     case 'invited':
     case 'pending':
+    case 'expired':
       return 'info'
     default:
       return 'warning'

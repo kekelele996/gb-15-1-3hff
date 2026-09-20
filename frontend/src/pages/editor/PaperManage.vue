@@ -14,18 +14,32 @@
         <template #header>
           <div class="row-between">
             <span>审稿人分配</span>
-            <el-button
-              v-if="['initial_review', 'external_review', 'revision'].includes(paper.status)"
-              type="primary"
-              size="small"
-              @click="assignVisible = true"
-            >
-              追加审稿人
-            </el-button>
+            <div>
+              <span v-if="summary" class="round-progress">
+                第 {{ summary.round }} 轮评审：已完成 {{ summary.completed }} / {{ roundTotal }}
+              </span>
+              <el-button
+                v-if="['initial_review', 'external_review', 'revision'].includes(paper.status)"
+                type="primary"
+                size="small"
+                @click="assignVisible = true"
+              >
+                补邀审稿人
+              </el-button>
+            </div>
           </div>
         </template>
+        <el-progress
+          v-if="summary && roundTotal > 0"
+          :percentage="roundPercent"
+          :format="() => progressText"
+          class="mb-16"
+        />
         <EmptyState v-if="!paper.reviews?.length" description="尚未分配审稿人" />
         <el-table v-else :data="paper.reviews" size="small" border>
+          <el-table-column label="轮次" width="80">
+            <template #default="{ row }">第{{ row.round }}轮</template>
+          </el-table-column>
           <el-table-column label="审稿人" width="140">
             <template #default="{ row }">{{ row.reviewer?.real_name || row.reviewer?.username || '-' }}</template>
           </el-table-column>
@@ -40,6 +54,9 @@
           </el-table-column>
           <el-table-column prop="comments" label="评审意见" show-overflow-tooltip />
           <el-table-column prop="confidential_comments" label="给编辑的保密意见" show-overflow-tooltip />
+          <el-table-column label="截止日期" width="150">
+            <template #default="{ row }">{{ formatTime(row.due_date) }}</template>
+          </el-table-column>
           <el-table-column label="完成时间" width="150">
             <template #default="{ row }">{{ formatTime(row.completed_at) }}</template>
           </el-table-column>
@@ -65,7 +82,27 @@
       </el-card>
 
       <el-card shadow="never" class="mt-16">
-        <template #header>终审决定</template>
+        <template #header>
+          <div class="row-between">
+            <span>终审决定</span>
+            <span v-if="summary" class="round-progress">当前第 {{ summary.round }} 轮</span>
+          </div>
+        </template>
+        <el-descriptions v-if="summary" :column="5" border class="mb-16">
+          <el-descriptions-item label="已完成">{{ summary.completed }} 人</el-descriptions-item>
+          <el-descriptions-item label="待接受">{{ summary.pending }} 人</el-descriptions-item>
+          <el-descriptions-item label="审稿中">{{ summary.in_progress }} 人</el-descriptions-item>
+          <el-descriptions-item label="已拒绝">{{ summary.declined }} 人</el-descriptions-item>
+          <el-descriptions-item label="已超期">{{ summary.expired }} 人</el-descriptions-item>
+        </el-descriptions>
+        <el-alert
+          v-if="summary && !summary.can_finalize"
+          :title="`暂不能终审：${summary.block_reason}`"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="mb-16"
+        />
         <el-form label-width="90px" style="max-width: 640px">
           <el-form-item label="决定">
             <el-radio-group v-model="decision">
@@ -79,21 +116,36 @@
           <el-form-item>
             <el-button
               type="primary"
-              :disabled="!['initial_review', 'external_review', 'revision'].includes(paper.status)"
+              :disabled="!canSubmitDecision"
               :loading="decisionLoading"
               @click="submitDecision"
             >
               提交终审决定
             </el-button>
+            <span v-if="summary && !summary.can_finalize" class="gate-hint">
+              需当前轮次有效评审至少 2 人完成且无待处理邀请
+            </span>
           </el-form-item>
         </el-form>
       </el-card>
     </template>
   </div>
 
-  <el-dialog v-model="assignVisible" title="追加审稿人" width="480px">
+  <el-dialog v-model="assignVisible" title="补邀审稿人" width="480px">
+    <el-alert
+      title="同一人同一轮只能存在一条有效任务；已拒绝或已超期的审稿人可再次邀请"
+      type="info"
+      :closable="false"
+      class="mb-16"
+    />
     <el-select v-model="assignReviewerId" placeholder="选择审稿人" style="width: 100%">
-      <el-option v-for="r in reviewers" :key="r.id" :label="`${r.real_name}（${r.username}）`" :value="r.id" />
+      <el-option
+        v-for="r in reviewers"
+        :key="r.id"
+        :label="`${r.real_name}（${r.username}）${busyReviewerIds.has(r.id) ? '（本轮已有有效任务）' : ''}`"
+        :value="r.id"
+        :disabled="busyReviewerIds.has(r.id)"
+      />
     </el-select>
     <template #footer>
       <el-button @click="assignVisible = false">取消</el-button>
@@ -103,12 +155,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { assignReviewer } from '../../api/review'
+import { assignReviewer, getReviewSummary } from '../../api/review'
 import { finalDecision, getPaper, getPlagiarism, listReviewers, rerunPlagiarism as rerunApi } from '../../api/paper'
-import type { Paper, PlagiarismResult } from '../../api/types'
+import type { Paper, PlagiarismResult, ReviewSummary } from '../../api/types'
 import EmptyState from '../../components/EmptyState.vue'
 import PaperInfoCard from '../../components/PaperInfoCard.vue'
 import StatusBadge from '../../components/StatusBadge.vue'
@@ -122,10 +174,46 @@ const assignLoading = ref(false)
 const assignVisible = ref(false)
 const paper = ref<Paper | null>(null)
 const plagiarism = ref<PlagiarismResult | null>(null)
+const summary = ref<ReviewSummary | null>(null)
 const reviewers = ref<Array<{ id: number; real_name: string; username: string }>>([])
 const decision = ref('accepted')
 const comment = ref('')
 const assignReviewerId = ref(0)
+
+const roundTotal = computed(() => {
+  if (!summary.value) return 0
+  return summary.value.completed + summary.value.pending + summary.value.in_progress
+})
+
+const roundPercent = computed(() => {
+  if (!summary.value || roundTotal.value === 0) return 0
+  return Math.round((summary.value.completed / roundTotal.value) * 100)
+})
+
+const progressText = computed(() => `${summary.value?.completed ?? 0}/${roundTotal.value}`)
+
+const canSubmitDecision = computed(() => {
+  if (!paper.value || !summary.value) return false
+  if (!['initial_review', 'external_review', 'revision'].includes(paper.value.status)) return false
+  return summary.value.can_finalize
+})
+
+// 当前轮已有有效任务（含已完成）的审稿人，补邀时禁用
+const busyReviewerIds = computed(() => {
+  const ids = new Set<number>()
+  if (!paper.value?.reviews || !summary.value) return ids
+  const round = summary.value.round
+  const now = Date.now()
+  for (const r of paper.value.reviews) {
+    if (r.round !== round) continue
+    if (r.status === 'completed') {
+      ids.add(r.reviewer_id)
+    } else if (['invited', 'accepted'].includes(r.status)) {
+      if (!r.due_date || new Date(r.due_date).getTime() > now) ids.add(r.reviewer_id)
+    }
+  }
+  return ids
+})
 
 async function load() {
   const id = route.params.id as string
@@ -133,6 +221,7 @@ async function load() {
   try {
     paper.value = await getPaper(id)
     plagiarism.value = await getPlagiarism(id)
+    summary.value = await getReviewSummary(id)
   } catch {
     // 拦截器已提示
   } finally {
@@ -193,5 +282,18 @@ onMounted(async () => {
 <style scoped>
 .mb {
   margin-bottom: 4px;
+}
+.mb-16 {
+  margin-bottom: 16px;
+}
+.round-progress {
+  color: #909399;
+  font-size: 13px;
+  margin-right: 12px;
+}
+.gate-hint {
+  margin-left: 12px;
+  color: #e6a23c;
+  font-size: 12px;
 }
 </style>

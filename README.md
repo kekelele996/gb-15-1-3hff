@@ -37,11 +37,12 @@ docker compose down -v --remove-orphans
 
 1. **作者投稿管理**：注册登录后创建投稿，上传 PDF/Word 论文文件，填写标题、摘要、关键词、学科分类、作者与单位，跟踪投稿状态（已提交→初审中→外审中→修改中→已录用/已拒稿）。
 2. **编辑部初审**：编辑检查格式与选题，通过后分配给审稿人，不通过退回作者并附理由。
-3. **同行评审管理**：审稿人接受/拒绝邀请，接受后按截止日期提交评审意见（录用/小修后录用/大修后重审/拒稿），支持匿名双盲（给编辑的保密意见仅编辑可见）。
-4. **修稿与反馈**：作者按审稿意见修改并重新提交，上传逐条回复的修改说明，多轮迭代。
-5. **查重检测**：投稿自动触发查重，展示重复率与重复段落标注，超过 30% 自动退回。
-6. **论文库与检索**：已录用论文进入论文库，支持按标题/摘要/关键词/学科检索。
-7. **数据统计**：编辑统计面板——投稿量趋势、学科分布、平均审稿周期、录用率、审稿人工作量排名。
+3. **同行评审管理**：外审可邀请多位审稿人；审稿人接受/拒绝邀请，接受后按截止日期提交评审意见（录用/小修后录用/大修后重审/拒稿），支持匿名双盲（给编辑的保密意见仅编辑可见）。邀请被拒绝或超过截止日期后旧记录失效（已超期），编辑可补邀；同一人同一轮不能同时存在两条有效任务，已失效的旧任务不得再回应。
+4. **修稿与反馈**：作者按审稿意见修改并重新提交，上传逐条回复的修改说明；提交修改稿时按仍在有效期内的审稿人自动开启新一轮匿名评审，旧轮次意见只读保留并展示评审进度（第 N 轮已完成 x/y）。
+5. **终审门禁**：编辑只有在当前轮次有效评审记录至少两位完成、且没有待处理邀请时才能终审；终审页实时显示已完成、待接受、审稿中、已拒绝、已超期人数，条件不足时前端禁用提交、后端二次校验拦截。
+6. **查重检测**：投稿自动触发查重，展示重复率与重复段落标注，超过 30% 自动退回。
+7. **论文库与检索**：已录用论文进入论文库，支持按标题/摘要/关键词/学科检索。
+8. **数据统计**：编辑统计面板——投稿量趋势、学科分布、平均审稿周期、录用率、审稿人工作量排名。
 
 ## 本地开发（备选）
 
@@ -148,7 +149,7 @@ gb-15-1/
 | GET | /papers/:id | 论文详情 | 登录 |
 | PUT | /papers/:id | 更新元信息 | 作者本人 |
 | POST | /papers/:id/initial-review | 初审通过/退回 | 编辑/管理员 |
-| POST | /papers/:id/final-decision | 终审录用/拒稿 | 编辑/管理员 |
+| POST | /papers/:id/final-decision | 终审录用/拒稿（有效评审≥2人完成且无待处理邀请） | 编辑/管理员 |
 | POST | /papers/:id/revise | 修稿重投 | 作者本人 |
 | GET | /library/papers?keyword=&subject= | 论文库检索 | 登录 |
 | GET | /papers/:id/revisions | 修稿记录 | 登录 |
@@ -158,10 +159,11 @@ gb-15-1/
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
 | GET | /reviews/mine?status= | 我的审稿任务 | 审稿人/管理员 |
-| GET | /reviews/paper/:paperID | 论文审稿记录 | 登录 |
+| GET | /reviews/paper/:paperID | 论文审稿记录（含历史轮次） | 登录 |
+| GET | /reviews/paper/:paperID/summary | 当前轮次审稿进度汇总（终审门禁人数统计） | 登录 |
 | POST | /reviews/:id/respond | 接受/拒绝邀请 | 审稿人本人 |
 | POST | /reviews/:id/submit | 提交评审意见 | 审稿人本人 |
-| POST | /papers/:id/reviewers | 追加分配审稿人 | 编辑/管理员 |
+| POST | /papers/:id/reviewers | 补邀审稿人（同一人同一轮仅一条有效任务） | 编辑/管理员 |
 
 ### 查重 / 文件 / 统计 / 审计
 
@@ -182,6 +184,7 @@ gb-15-1/
 - `GET /papers/mine`、`GET /papers`、`GET /library/papers` 三个接口复用 `PaperService.list` 与 `PaperRepository.List`（同一 repository 方法）。
 - 「论文创建自动查重」与 `POST /papers/:id/plagiarism/rerun` 复用 `PlagiarismService.RunCheck`（同一 service 方法）。
 - `POST /papers/:id/initial-review` 与 `POST /papers/:id/reviewers` 复用 `ReviewRepository.Create` 创建审稿邀请。
+- `GET /reviews/paper/:paperID/summary` 与 `POST /papers/:id/final-decision` 复用 `SummarizeReviews`（同一 service 函数）计算当前轮次人数与终审门禁。
 
 ### curl 调用示例（含 JWT）
 
@@ -247,16 +250,19 @@ curl -sS http://localhost:3009/healthz
 - 前端 constants：`frontend/src/constants/index.ts`（PAPER_STATUS_MAP / PAPER_STATUS_ORDER）
 - 前端组件/页面：`frontend/src/components/StatusBadge.vue`、`frontend/src/components/PaperStatusSteps.vue`、`frontend/src/pages/author/PaperList.vue`、`frontend/src/pages/editor/InitialReview.vue`
 
-### 3. 审稿状态 ReviewStatus（invited / accepted / declined / completed）
+### 3. 审稿状态 ReviewStatus（invited / accepted / declined / completed / expired）
 
-- 后端 model：`backend/internal/model/review.go`
-- 后端 constants：`backend/internal/constants/review_status.go`
-- 后端 service 状态机：`backend/internal/service/review_service.go`（Respond/Submit）
-- 后端 repository：`backend/internal/repository/review_repository.go`（CountCompleted）
+- 后端 model：`backend/internal/model/review.go`（status/round 字段）
+- 后端 constants：`backend/internal/constants/review_status.go`（含 ReviewOpenStatusList / ReviewActiveStatusList）
+- 后端 DTO：`backend/internal/dto/review_dto.go`（ReviewQuery oneof、ReviewSummaryResponse）
+- 后端 service 状态机：`backend/internal/service/review_service.go`（Respond/Submit/Assign/SummarizeReviews）、`backend/internal/service/paper_service.go`（startNextReviewRound 新轮次开启、FinalDecision 终审门禁）
+- 后端 repository：`backend/internal/repository/review_repository.go`（CountCompleted、ExpireOverdue、ExpireOpenByPaper、MaxRoundByPaper、FindActiveByPaperReviewer）
+- 后端 handler 校验：`backend/internal/handler/review_handler.go`
 - 后端 formatters：`backend/internal/util/formatters.go`（FormatReviewStatus）
-- 后端日志模板：`backend/internal/constants/log_templates.go`（LogReviewRespond、LogReviewSubmit）
+- 后端日志模板：`backend/internal/constants/log_templates.go`（LogReviewRespond、LogReviewSubmit、LogReviewExpireSweep、LogReviewRoundStart、LogReviewReinvite、LogReviewSummary、LogFinalDecisionBlocked）
+- 后端错误码：`backend/internal/constants/error_codes.go`（ErrReviewNotAllowed、ErrReviewGateNotSatisfied、ErrReviewExpired）
 - 前端 constants：`frontend/src/constants/index.ts`（REVIEW_STATUS_MAP）
-- 前端页面：`frontend/src/pages/reviewer/MyReviews.vue`、`frontend/src/pages/editor/PaperManage.vue`
+- 前端组件/页面：`frontend/src/components/StatusBadge.vue`、`frontend/src/pages/reviewer/MyReviews.vue`、`frontend/src/pages/reviewer/ReviewDetail.vue`、`frontend/src/pages/editor/PaperManage.vue`、`frontend/src/pages/author/PaperDetail.vue`
 
 ### 4. 评审等级 ReviewDecision（accept / minor_revision / major_revision / reject）
 

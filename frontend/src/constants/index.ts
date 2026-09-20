@@ -27,7 +27,8 @@ export const REVIEW_STATUS_MAP: Record<string, string> = {
   invited: '待接受',
   accepted: '审稿中',
   declined: '已婉拒',
-  completed: '已完成'
+  completed: '已完成',
+  expired: '已超期'
 }
 
 export const REVIEW_DECISION_MAP: Record<string, string> = {

@@ -3,6 +3,7 @@
     <el-page-header class="mb" @back="router.back()">
       <template #content>
         <span style="font-weight: 600">审稿详情</span>
+        <el-tag v-if="review" size="small" effect="plain" style="margin-left: 8px">第{{ review.round }}轮</el-tag>
       </template>
     </el-page-header>
     <template v-if="review">

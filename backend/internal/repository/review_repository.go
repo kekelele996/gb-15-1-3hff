@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/paperflow/paperflow/internal/constants"
 	"github.com/paperflow/paperflow/internal/model"
@@ -19,7 +20,10 @@ type ReviewRepository interface {
 	FindByIDForUpdate(ctx context.Context, id uint) (*model.Review, error)
 	ListByReviewer(ctx context.Context, reviewerID uint, status string, page, size int) ([]model.Review, int64, error)
 	ListByPaper(ctx context.Context, paperID uint) ([]model.Review, error)
-	FindInviteByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error)
+	FindActiveByPaperReviewer(ctx context.Context, paperID, reviewerID uint, round int) (*model.Review, error)
+	MaxRoundByPaper(ctx context.Context, paperID uint) (int, error)
+	ExpireOverdue(ctx context.Context, now time.Time) (int64, error)
+	ExpireOpenByPaper(ctx context.Context, paperID uint) (int64, error)
 	CountCompletedByReviewer(ctx context.Context) ([]model.ReviewerLoad, error)
 	CountCompleted(ctx context.Context) (int64, error)
 	AvgDurationDays(ctx context.Context) (float64, error)
@@ -96,15 +100,47 @@ func (r *reviewRepository) ListByPaper(ctx context.Context, paperID uint) ([]mod
 	return items, nil
 }
 
-func (r *reviewRepository) FindInviteByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error) {
+func (r *reviewRepository) FindActiveByPaperReviewer(ctx context.Context, paperID, reviewerID uint, round int) (*model.Review, error) {
 	var v model.Review
-	if err := r.db.WithContext(ctx).Where("paper_id = ? AND reviewer_id = ?", paperID, reviewerID).First(&v).Error; err != nil {
+	if err := r.db.WithContext(ctx).
+		Where("paper_id = ? AND reviewer_id = ? AND round = ? AND status IN ?", paperID, reviewerID, round, constants.ReviewActiveStatusList).
+		First(&v).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("find invite paper %d reviewer %d: %w", paperID, reviewerID, ErrNotFound)
+			return nil, fmt.Errorf("find active review paper %d reviewer %d round %d: %w", paperID, reviewerID, round, ErrNotFound)
 		}
-		return nil, fmt.Errorf("find invite paper %d reviewer %d: %w", paperID, reviewerID, err)
+		return nil, fmt.Errorf("find active review paper %d reviewer %d round %d: %w", paperID, reviewerID, round, err)
 	}
 	return &v, nil
+}
+
+func (r *reviewRepository) MaxRoundByPaper(ctx context.Context, paperID uint) (int, error) {
+	var maxRound int
+	if err := r.db.WithContext(ctx).Model(&model.Review{}).
+		Where("paper_id = ?", paperID).
+		Select("COALESCE(MAX(round), 0)").Scan(&maxRound).Error; err != nil {
+		return 0, fmt.Errorf("max review round paper %d: %w", paperID, err)
+	}
+	return maxRound, nil
+}
+
+func (r *reviewRepository) ExpireOverdue(ctx context.Context, now time.Time) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&model.Review{}).
+		Where("status IN ? AND due_date IS NOT NULL AND due_date < ?", constants.ReviewOpenStatusList, now).
+		Updates(map[string]any{"status": constants.ReviewStatusExpired, "updated_at": now})
+	if res.Error != nil {
+		return 0, fmt.Errorf("expire overdue reviews: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
+func (r *reviewRepository) ExpireOpenByPaper(ctx context.Context, paperID uint) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&model.Review{}).
+		Where("paper_id = ? AND status IN ?", paperID, constants.ReviewOpenStatusList).
+		Updates(map[string]any{"status": constants.ReviewStatusExpired, "updated_at": time.Now()})
+	if res.Error != nil {
+		return 0, fmt.Errorf("expire open reviews paper %d: %w", paperID, res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 func (r *reviewRepository) CountCompletedByReviewer(ctx context.Context) ([]model.ReviewerLoad, error) {

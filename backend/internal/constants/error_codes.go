@@ -26,6 +26,8 @@ const (
 	ErrPaperTitleExists    = 40904
 	ErrReviewNotFound      = 40403
 	ErrReviewNotAllowed    = 40903
+	ErrReviewGateNotSatisfied = 40905
+	ErrReviewExpired       = 40906
 	ErrRevisionNotFound    = 40406
 	ErrPlagiarismNotFound  = 40404
 	ErrAuditNotFound       = 40405

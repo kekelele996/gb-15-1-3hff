@@ -1,8 +1,16 @@
 import request from '../utils/request'
-import type { PageResult, ReviewItem } from './types'
+import type { PageResult, ReviewItem, ReviewSummary } from './types'
 
 export function listMyReviews(params: Record<string, unknown>) {
   return request.get('/reviews/mine', { params }) as Promise<PageResult<ReviewItem>>
+}
+
+export function listPaperReviews(paperId: number | string) {
+  return request.get(`/reviews/paper/${paperId}`) as Promise<ReviewItem[]>
+}
+
+export function getReviewSummary(paperId: number | string) {
+  return request.get(`/reviews/paper/${paperId}/summary`) as Promise<ReviewSummary>
 }
 
 export function respondReview(id: number | string, data: { accept: boolean }) {

@@ -55,6 +55,21 @@ func (h *ReviewHandler) ListByPaper(c *gin.Context) {
 	util.OK(c, items)
 }
 
+// Summary 论文当前轮次审稿进度汇总（终审页人数统计与门禁）。
+func (h *ReviewHandler) Summary(c *gin.Context) {
+	paperID, err := strconv.ParseUint(c.Param("paperID"), 10, 64)
+	if err != nil || paperID == 0 {
+		util.Fail(c, http.StatusBadRequest, constants.CodeBadRequest, "请求失败：路径参数 paperID 不合法")
+		return
+	}
+	summary, err := h.reviewSvc.Summary(c.Request.Context(), uint(paperID))
+	if err != nil {
+		h.wrapError(c, err)
+		return
+	}
+	util.OK(c, summary)
+}
+
 // Respond 接受/拒绝审稿邀请（审稿人）。
 func (h *ReviewHandler) Respond(c *gin.Context) {
 	id, ok := parseID(c)

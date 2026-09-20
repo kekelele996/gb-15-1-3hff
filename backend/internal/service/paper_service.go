@@ -181,6 +181,7 @@ func (s *PaperService) InitialReview(ctx context.Context, editorID uint, paperID
 			PaperID:    paper.ID,
 			ReviewerID: reviewer.ID,
 			Status:     constants.ReviewStatusInvited,
+			Round:      1,
 			DueDate:    &due,
 		}
 		if err := tx.ReviewRepository().Create(ctx, invite); err != nil {
@@ -201,6 +202,7 @@ func (s *PaperService) InitialReview(ctx context.Context, editorID uint, paperID
 }
 
 // FinalDecision 终审决定：录用或拒稿。
+// 门禁：当前轮次有效评审记录至少两位完成、且没有待处理邀请，否则阻止提交。
 func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID uint, req dto.FinalDecisionRequest) (*model.Paper, error) {
 	err := s.store.Transaction(ctx, func(tx repository.Store) error {
 		paper, err := tx.PaperRepository().FindByIDForUpdate(ctx, paperID)
@@ -213,6 +215,21 @@ func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID
 			return util.NewAppError(constants.ErrPaperStatusNotAllowed,
 				fmt.Sprintf("终审失败：论文 %s 当前状态 %s 不允许终审",
 					paper.Title, util.FormatPaperStatus(paper.Status)), nil)
+		}
+		if _, err := tx.ReviewRepository().ExpireOverdue(ctx, timeNow()); err != nil {
+			return util.NewAppError(constants.ErrInternal, "终审失败：清理超期审稿任务时系统内部错误", err)
+		}
+		reviews, err := tx.ReviewRepository().ListByPaper(ctx, paperID)
+		if err != nil {
+			return util.NewAppError(constants.ErrInternal, "终审失败：查询审稿记录时系统内部错误", err)
+		}
+		summary := SummarizeReviews(paperID, reviews)
+		if !summary.CanFinalize {
+			s.logger.Warn(fmt.Sprintf(constants.LogFinalDecisionBlocked, paperID, summary.Completed, summary.Pending))
+			return util.NewAppError(constants.ErrReviewGateNotSatisfied,
+				fmt.Sprintf("终审失败：论文 %s（id=%d）第 %d 轮评审进度不满足条件（已完成 %d 位、待接受 %d 位、已拒绝 %d 位、已超期 %d 位）：%s，编辑角色暂不能终审",
+					paper.Title, paperID, summary.Round, summary.Completed, summary.Pending,
+					summary.Declined, summary.Expired, summary.BlockReason), nil)
 		}
 		paper.Status = req.Decision
 		paper.FinalDecision = req.Decision
@@ -233,8 +250,9 @@ func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID
 	return s.Detail(ctx, paperID)
 }
 
-// Revise 作者修稿重投：事务内写修稿记录并推进论文版本与状态。
+// Revise 作者修稿重投：事务内写修稿记录、推进论文版本与状态，并开启新一轮匿名评审。
 func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, req dto.ReviseRequest) (*model.Paper, error) {
+	var newRound, roundReviewers int
 	err := s.store.Transaction(ctx, func(tx repository.Store) error {
 		paper, err := tx.PaperRepository().FindByIDForUpdate(ctx, paperID)
 		if err != nil {
@@ -264,6 +282,11 @@ func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, 
 		if err := tx.PaperRepository().Update(ctx, paper); err != nil {
 			return err
 		}
+		round, reviewerCount, err := startNextReviewRound(ctx, tx, paperID)
+		if err != nil {
+			return err
+		}
+		newRound, roundReviewers = round, reviewerCount
 		return nil
 	})
 	if err != nil {
@@ -278,5 +301,59 @@ func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, 
 		return nil, err
 	}
 	s.logger.Info(fmt.Sprintf(constants.LogReviseSubmit, paperID, paper.Version))
+	s.logger.Info(fmt.Sprintf(constants.LogReviewRoundStart, paperID, newRound, roundReviewers))
 	return paper, nil
+}
+
+// startNextReviewRound 作者提交修改稿后开启新一轮匿名评审：
+// 按仍在有效期内的审稿人生成新任务，旧开放任务失效（不得再回应），旧意见只读保留。
+func startNextReviewRound(ctx context.Context, tx repository.Store, paperID uint) (int, int, error) {
+	reviews, err := tx.ReviewRepository().ListByPaper(ctx, paperID)
+	if err != nil {
+		return 0, 0, util.NewAppError(constants.ErrInternal, "开启新一轮评审失败：查询审稿记录时系统内部错误", err)
+	}
+	maxRound := 0
+	for _, r := range reviews {
+		if r.Round > maxRound {
+			maxRound = r.Round
+		}
+	}
+	now := timeNow()
+	valid := make([]uint, 0, len(reviews))
+	seen := map[uint]bool{}
+	for _, r := range reviews {
+		if r.Round != maxRound || seen[r.ReviewerID] {
+			continue
+		}
+		switch r.Status {
+		case constants.ReviewStatusCompleted:
+			// 已完成旧意见的审稿人仍在评审序列
+		case constants.ReviewStatusInvited, constants.ReviewStatusAccepted:
+			if r.DueDate != nil && !r.DueDate.After(now) {
+				continue // 已超期失效，不再邀请
+			}
+		default:
+			continue // 已拒绝/已超期不再邀请，编辑可补邀他人
+		}
+		seen[r.ReviewerID] = true
+		valid = append(valid, r.ReviewerID)
+	}
+	if _, err := tx.ReviewRepository().ExpireOpenByPaper(ctx, paperID); err != nil {
+		return 0, 0, util.NewAppError(constants.ErrInternal, "开启新一轮评审失败：失效旧任务时系统内部错误", err)
+	}
+	newRound := maxRound + 1
+	due := now.AddDate(0, 0, 14)
+	for _, reviewerID := range valid {
+		invite := &model.Review{
+			PaperID:    paperID,
+			ReviewerID: reviewerID,
+			Status:     constants.ReviewStatusInvited,
+			Round:      newRound,
+			DueDate:    &due,
+		}
+		if err := tx.ReviewRepository().Create(ctx, invite); err != nil {
+			return 0, 0, err
+		}
+	}
+	return newRound, len(valid), nil
 }

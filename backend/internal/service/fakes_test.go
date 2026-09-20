@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/paperflow/paperflow/internal/constants"
 	"github.com/paperflow/paperflow/internal/model"
 	"github.com/paperflow/paperflow/internal/repository"
 )
@@ -157,13 +159,49 @@ func (f *fakeReviewRepo) ListByPaper(ctx context.Context, paperID uint) ([]model
 	return items, nil
 }
 
-func (f *fakeReviewRepo) FindInviteByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error) {
+func (f *fakeReviewRepo) FindActiveByPaperReviewer(ctx context.Context, paperID, reviewerID uint, round int) (*model.Review, error) {
 	for _, r := range f.reviews {
-		if r.PaperID == paperID && r.ReviewerID == reviewerID {
+		if r.PaperID == paperID && r.ReviewerID == reviewerID && r.Round == round &&
+			(r.Status == constants.ReviewStatusInvited || r.Status == constants.ReviewStatusAccepted ||
+				r.Status == constants.ReviewStatusCompleted) {
 			return r, nil
 		}
 	}
 	return nil, repository.ErrNotFound
+}
+
+func (f *fakeReviewRepo) MaxRoundByPaper(ctx context.Context, paperID uint) (int, error) {
+	maxRound := 0
+	for _, r := range f.reviews {
+		if r.PaperID == paperID && r.Round > maxRound {
+			maxRound = r.Round
+		}
+	}
+	return maxRound, nil
+}
+
+func (f *fakeReviewRepo) ExpireOverdue(ctx context.Context, now time.Time) (int64, error) {
+	var n int64
+	for _, r := range f.reviews {
+		if (r.Status == constants.ReviewStatusInvited || r.Status == constants.ReviewStatusAccepted) &&
+			r.DueDate != nil && r.DueDate.Before(now) {
+			r.Status = constants.ReviewStatusExpired
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeReviewRepo) ExpireOpenByPaper(ctx context.Context, paperID uint) (int64, error) {
+	var n int64
+	for _, r := range f.reviews {
+		if r.PaperID == paperID &&
+			(r.Status == constants.ReviewStatusInvited || r.Status == constants.ReviewStatusAccepted) {
+			r.Status = constants.ReviewStatusExpired
+			n++
+		}
+	}
+	return n, nil
 }
 
 type fakeRevisionRepo struct {

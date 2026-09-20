@@ -13,6 +13,8 @@ const (
 	MsgInvalidCredential = "用户名或密码错误"
 	MsgPaperNotFound = "论文不存在"
 	MsgReviewNotFound = "审稿任务不存在"
+	MsgReviewExpired = "审稿任务已超期失效，不可再回应"
+	MsgReviewGateNotSatisfied = "有效评审记录不足两人完成或存在待处理邀请，暂不能终审"
 	MsgFileTooLarge  = "文件大小超过限制（50MB）"
 	MsgFileTypeNotAllowed = "仅支持 PDF / Word 格式文件"
 	MsgRateLimited   = "请求过于频繁，请稍后再试"

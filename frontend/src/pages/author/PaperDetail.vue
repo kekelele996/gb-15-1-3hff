@@ -39,7 +39,20 @@
       </el-card>
 
       <el-card shadow="never" class="mt-16">
-        <template #header>审稿意见</template>
+        <template #header>
+          <div class="row-between">
+            <span>审稿意见</span>
+            <span v-if="summary" class="round-progress">
+              第 {{ summary.round }} 轮评审：已完成 {{ summary.completed }} / {{ roundTotal }}
+            </span>
+          </div>
+        </template>
+        <el-progress
+          v-if="summary && roundTotal > 0"
+          :percentage="roundPercent"
+          :format="() => progressText"
+          class="progress"
+        />
         <EmptyState v-if="!paper.reviews?.length" description="暂无审稿记录" />
         <el-timeline v-else>
           <el-timeline-item
@@ -49,7 +62,8 @@
             placement="top"
           >
             <p>
-              <strong>{{ r.reviewer?.real_name || r.reviewer?.username || '审稿人' }}</strong>
+              <el-tag size="small" effect="plain">第{{ r.round }}轮</el-tag>
+              <strong style="margin-left: 8px">{{ r.reviewer?.real_name || r.reviewer?.username || '审稿人' }}</strong>
               <StatusBadge :status="r.status" kind="review" style="margin-left: 8px" />
               <StatusBadge v-if="r.decision" :status="r.decision" kind="decision" style="margin-left: 8px" />
             </p>
@@ -89,7 +103,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getPaper, getPlagiarism } from '../../api/paper'
-import type { Paper, PlagiarismResult } from '../../api/types'
+import { getReviewSummary } from '../../api/review'
+import type { Paper, PlagiarismResult, ReviewSummary } from '../../api/types'
 import EmptyState from '../../components/EmptyState.vue'
 import PaperInfoCard from '../../components/PaperInfoCard.vue'
 import PaperStatusSteps from '../../components/PaperStatusSteps.vue'
@@ -101,6 +116,19 @@ const router = useRouter()
 const loading = ref(false)
 const paper = ref<Paper | null>(null)
 const plagiarism = ref<PlagiarismResult | null>(null)
+const summary = ref<ReviewSummary | null>(null)
+
+const roundTotal = computed(() => {
+  if (!summary.value) return 0
+  return summary.value.completed + summary.value.pending + summary.value.in_progress
+})
+
+const roundPercent = computed(() => {
+  if (!summary.value || roundTotal.value === 0) return 0
+  return Math.round((summary.value.completed / roundTotal.value) * 100)
+})
+
+const progressText = computed(() => `${summary.value?.completed ?? 0}/${roundTotal.value}`)
 
 const reportItems = computed(() => {
   if (!plagiarism.value?.report) return []
@@ -117,6 +145,7 @@ onMounted(async () => {
   try {
     paper.value = await getPaper(id)
     plagiarism.value = await getPlagiarism(id)
+    summary.value = await getReviewSummary(id)
   } catch {
     // 拦截器已提示
   } finally {
@@ -128,5 +157,12 @@ onMounted(async () => {
 <style scoped>
 .mb {
   margin-bottom: 4px;
+}
+.progress {
+  margin-bottom: 16px;
+}
+.round-progress {
+  color: #909399;
+  font-size: 13px;
 }
 </style>

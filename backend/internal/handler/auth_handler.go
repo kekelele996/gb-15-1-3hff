@@ -99,7 +99,7 @@ func httpStatusForCode(code int) int {
 		constants.ErrRevisionNotFound, constants.ErrPlagiarismNotFound, constants.ErrAuditNotFound:
 		return http.StatusNotFound
 	case constants.ErrUserExists, constants.ErrPaperTitleExists, constants.ErrPaperStatusNotAllowed,
-		constants.ErrReviewNotAllowed:
+		constants.ErrReviewNotAllowed, constants.ErrReviewGateNotSatisfied, constants.ErrReviewExpired:
 		return http.StatusConflict
 	case constants.ErrSubjectNotAllowed:
 		return http.StatusUnprocessableEntity
