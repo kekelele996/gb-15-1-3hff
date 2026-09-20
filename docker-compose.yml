@@ -1,0 +1,104 @@
+name: paperflow
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-paperflow}-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-paperflow_db}
+      POSTGRES_USER: ${DB_USER:-paperflow_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-paperflow_pwd}
+    ports:
+      - "${DB_PORT:-44009}:5432"
+    volumes:
+      - paperflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-paperflow_user} -d ${DB_NAME:-paperflow_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-paperflow}-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-46309}:6379"
+    volumes:
+      - paperflow_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-paperflow}-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9005}:9000"
+      - "${MINIO_CONSOLE_PORT:-9006}:9001"
+    volumes:
+      - paperflow_miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-paperflow}-backend
+    restart: unless-stopped
+    environment:
+      SERVER_PORT: "8080"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-paperflow_user}
+      DB_PASSWORD: ${DB_PASSWORD:-paperflow_pwd}
+      DB_NAME: ${DB_NAME:-paperflow_db}
+      REDIS_ADDR: redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_string}
+      JWT_EXPIRE_HOURS: "72"
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: paperflow-files
+      MINIO_USE_SSL: "false"
+      LOG_LEVEL: info
+      SIMILARITY_THRESHOLD: "30"
+    ports:
+      - "${BACKEND_PORT:-3009}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-paperflow}-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8009}:80"
+    depends_on:
+      - backend
+
+volumes:
+  paperflow_pgdata:
+  paperflow_redisdata:
+  paperflow_miniodata:
