@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/paperflow/paperflow/internal/constants"
 	"github.com/paperflow/paperflow/internal/model"
@@ -19,7 +20,8 @@ type ReviewRepository interface {
 	FindByIDForUpdate(ctx context.Context, id uint) (*model.Review, error)
 	ListByReviewer(ctx context.Context, reviewerID uint, status string, page, size int) ([]model.Review, int64, error)
 	ListByPaper(ctx context.Context, paperID uint) ([]model.Review, error)
-	FindInviteByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error)
+	FindActiveByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error)
+	ExpireOverdue(ctx context.Context, now time.Time) (int64, error)
 	CountCompletedByReviewer(ctx context.Context) ([]model.ReviewerLoad, error)
 	CountCompleted(ctx context.Context) (int64, error)
 	AvgDurationDays(ctx context.Context) (float64, error)
@@ -96,15 +98,30 @@ func (r *reviewRepository) ListByPaper(ctx context.Context, paperID uint) ([]mod
 	return items, nil
 }
 
-func (r *reviewRepository) FindInviteByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error) {
+// FindActiveByPaperReviewer 查找同一审稿人在同一论文下仍在有效期的任务（待接受/审稿中）。
+// 同一审稿人同一时间只允许存在一条有效任务，已拒绝/已超期/已完成的历史记录不拦截补邀。
+func (r *reviewRepository) FindActiveByPaperReviewer(ctx context.Context, paperID, reviewerID uint) (*model.Review, error) {
 	var v model.Review
-	if err := r.db.WithContext(ctx).Where("paper_id = ? AND reviewer_id = ?", paperID, reviewerID).First(&v).Error; err != nil {
+	if err := r.db.WithContext(ctx).
+		Where("paper_id = ? AND reviewer_id = ? AND status IN ?", paperID, reviewerID, constants.ReviewActiveStatuses).
+		Order("id DESC").First(&v).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("find invite paper %d reviewer %d: %w", paperID, reviewerID, ErrNotFound)
+			return nil, fmt.Errorf("find active review paper %d reviewer %d: %w", paperID, reviewerID, ErrNotFound)
 		}
-		return nil, fmt.Errorf("find invite paper %d reviewer %d: %w", paperID, reviewerID, err)
+		return nil, fmt.Errorf("find active review paper %d reviewer %d: %w", paperID, reviewerID, err)
 	}
 	return &v, nil
+}
+
+// ExpireOverdue 将已超过截止日期的待接受/审稿中任务批量置为已超期（旧记录失效，不得再回应）。
+func (r *reviewRepository) ExpireOverdue(ctx context.Context, now time.Time) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&model.Review{}).
+		Where("status IN ? AND due_date IS NOT NULL AND due_date < ?", constants.ReviewActiveStatuses, now).
+		Updates(map[string]any{"status": constants.ReviewStatusExpired, "updated_at": now})
+	if res.Error != nil {
+		return 0, fmt.Errorf("expire overdue reviews: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 func (r *reviewRepository) CountCompletedByReviewer(ctx context.Context) ([]model.ReviewerLoad, error) {

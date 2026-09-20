@@ -10,6 +10,7 @@ type Review struct {
 	ReviewerID           uint       `gorm:"not null;index" json:"reviewer_id"`
 	Reviewer             User       `gorm:"foreignKey:ReviewerID" json:"reviewer,omitempty"`
 	Status               string     `gorm:"size:32;not null;default:invited;index" json:"status"`
+	Round                int        `gorm:"not null;default:1" json:"round"`
 	Decision             string     `gorm:"size:32" json:"decision"`
 	Comments             string     `gorm:"type:text" json:"comments"`
 	ConfidentialComments string     `gorm:"type:text" json:"confidential_comments"`

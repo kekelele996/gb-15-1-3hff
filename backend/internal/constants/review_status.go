@@ -6,6 +6,7 @@ const (
 	ReviewStatusAccepted  = "accepted"
 	ReviewStatusDeclined  = "declined"
 	ReviewStatusCompleted = "completed"
+	ReviewStatusExpired   = "expired"
 )
 
 // ReviewStatusList 全部审稿状态。
@@ -14,4 +15,14 @@ var ReviewStatusList = []string{
 	ReviewStatusAccepted,
 	ReviewStatusDeclined,
 	ReviewStatusCompleted,
+	ReviewStatusExpired,
 }
+
+// ReviewActiveStatuses 仍处有效期、可被审稿人响应的审稿状态。
+var ReviewActiveStatuses = []string{
+	ReviewStatusInvited,
+	ReviewStatusAccepted,
+}
+
+// FinalDecisionMinCompletedReviewers 终审所需的最少完成评审的有效审稿人数量。
+const FinalDecisionMinCompletedReviewers = 2

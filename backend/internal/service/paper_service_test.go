@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/paperflow/paperflow/internal/constants"
 	"github.com/paperflow/paperflow/internal/dto"
@@ -183,6 +184,166 @@ func TestPaperServiceRevise(t *testing.T) {
 	}
 	if revisions[0].Version != 2 {
 		t.Errorf("expected revision version 2, got %d", revisions[0].Version)
+	}
+}
+
+// 修稿后按仍在有效期内的审稿人开启新一轮匿名评审：旧有效任务失效、旧意见只读保留。
+func TestPaperServiceReviseOpensNewReviewRound(t *testing.T) {
+	store, svc := newPaperTestEnv(t)
+	ctx := context.Background()
+
+	paper := &model.Paper{
+		Title: "新一轮评审论文", Status: constants.PaperStatusRevision,
+		SubmitterID: 1, Version: 1,
+	}
+	if err := store.papers.Create(ctx, paper); err != nil {
+		t.Fatalf("create paper: %v", err)
+	}
+	future := time.Now().Add(7 * 24 * time.Hour)
+	seed := []model.Review{
+		{PaperID: paper.ID, ReviewerID: 11, Status: constants.ReviewStatusCompleted, Round: 1, Decision: constants.ReviewDecisionMajorRevision, Comments: "旧意见只读保留"},
+		{PaperID: paper.ID, ReviewerID: 12, Status: constants.ReviewStatusAccepted, Round: 1, DueDate: &future},
+		{PaperID: paper.ID, ReviewerID: 13, Status: constants.ReviewStatusDeclined, Round: 1},
+	}
+	for i := range seed {
+		if err := store.reviews.Create(ctx, &seed[i]); err != nil {
+			t.Fatalf("create review: %v", err)
+		}
+	}
+
+	if _, err := svc.Revise(ctx, 1, paper.ID, dto.ReviseRequest{
+		FileKey: "papers/v2.pdf", FileName: "v2.pdf", ResponseLetter: "已逐条回复审稿意见并修改。",
+	}); err != nil {
+		t.Fatalf("revise: %v", err)
+	}
+
+	reviews, err := store.reviews.ListByPaper(ctx, paper.ID)
+	if err != nil {
+		t.Fatalf("list reviews: %v", err)
+	}
+	byReviewer := map[uint][]model.Review{}
+	for _, r := range reviews {
+		byReviewer[r.ReviewerID] = append(byReviewer[r.ReviewerID], r)
+	}
+	// 已完成审稿人：旧意见保留为 completed，新增第 2 轮邀请。
+	if got := len(byReviewer[11]); got != 2 {
+		t.Fatalf("reviewer 11: expected 2 records, got %d", got)
+	}
+	old11 := findByRound(byReviewer[11], 1)
+	if old11 == nil || old11.Status != constants.ReviewStatusCompleted || old11.Comments != "旧意见只读保留" {
+		t.Errorf("reviewer 11: old opinion should stay completed read-only, got %+v", old11)
+	}
+	// 审稿中审稿人：旧任务失效为 expired，新增第 2 轮邀请。
+	if got := len(byReviewer[12]); got != 2 {
+		t.Fatalf("reviewer 12: expected 2 records, got %d", got)
+	}
+	old12 := findByRound(byReviewer[12], 1)
+	if old12 == nil || old12.Status != constants.ReviewStatusExpired {
+		t.Errorf("reviewer 12: old active task should be expired, got %+v", old12)
+	}
+	// 已拒绝审稿人：不自动续邀。
+	if got := len(byReviewer[13]); got != 1 {
+		t.Fatalf("reviewer 13: expected no re-invite, got %d records", got)
+	}
+	// 新邀请均为第 2 轮待接受。
+	for _, rid := range []uint{11, 12} {
+		invite := findByRound(byReviewer[rid], 2)
+		if invite == nil || invite.Status != constants.ReviewStatusInvited || invite.DueDate == nil {
+			t.Errorf("reviewer %d: expected round-2 invited task with due date, got %+v", rid, invite)
+		}
+	}
+}
+
+func findByRound(reviews []model.Review, round int) *model.Review {
+	for i := range reviews {
+		if reviews[i].Round == round {
+			return &reviews[i]
+		}
+	}
+	return nil
+}
+
+// 终审门槛：有效完成评审不足两人或存在待处理邀请时阻止终审。
+func TestPaperServiceFinalDecisionGate(t *testing.T) {
+	store, svc := newPaperTestEnv(t)
+	ctx := context.Background()
+
+	paper := &model.Paper{
+		Title: "终审门槛论文", Status: constants.PaperStatusExternalReview,
+		SubmitterID: 1, Version: 1,
+	}
+	if err := store.papers.Create(ctx, paper); err != nil {
+		t.Fatalf("create paper: %v", err)
+	}
+	decision := dto.FinalDecisionRequest{Decision: constants.PaperStatusAccepted, Comment: "同意录用"}
+
+	// 仅 1 人完成：阻止。
+	r1 := &model.Review{PaperID: paper.ID, ReviewerID: 21, Status: constants.ReviewStatusCompleted, Round: 1}
+	if err := store.reviews.Create(ctx, r1); err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	if _, err := svc.FinalDecision(ctx, 2, paper.ID, decision); err == nil {
+		t.Fatalf("expected final decision blocked with only 1 completed review")
+	}
+
+	// 2 人完成但存在待接受邀请：阻止。
+	r2 := &model.Review{PaperID: paper.ID, ReviewerID: 22, Status: constants.ReviewStatusCompleted, Round: 1}
+	r3 := &model.Review{PaperID: paper.ID, ReviewerID: 23, Status: constants.ReviewStatusInvited, Round: 1}
+	if err := store.reviews.Create(ctx, r2); err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	if err := store.reviews.Create(ctx, r3); err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	if _, err := svc.FinalDecision(ctx, 2, paper.ID, decision); err == nil {
+		t.Fatalf("expected final decision blocked with pending invite")
+	}
+
+	// 待接受邀请被拒绝后：允许终审。
+	r3.Status = constants.ReviewStatusDeclined
+	if err := store.reviews.Update(ctx, r3); err != nil {
+		t.Fatalf("decline invite: %v", err)
+	}
+	updated, err := svc.FinalDecision(ctx, 2, paper.ID, decision)
+	if err != nil {
+		t.Fatalf("final decision should pass: %v", err)
+	}
+	if updated.Status != constants.PaperStatusAccepted {
+		t.Errorf("expected accepted, got %s", updated.Status)
+	}
+}
+
+// 已过截止日期的待接受邀请在终审前被清扫为已超期，不再阻塞终审。
+func TestPaperServiceFinalDecisionSweepsExpiredInvite(t *testing.T) {
+	store, svc := newPaperTestEnv(t)
+	ctx := context.Background()
+
+	paper := &model.Paper{
+		Title: "超期清扫论文", Status: constants.PaperStatusExternalReview,
+		SubmitterID: 1, Version: 1,
+	}
+	if err := store.papers.Create(ctx, paper); err != nil {
+		t.Fatalf("create paper: %v", err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	seed := []model.Review{
+		{PaperID: paper.ID, ReviewerID: 31, Status: constants.ReviewStatusCompleted, Round: 1},
+		{PaperID: paper.ID, ReviewerID: 32, Status: constants.ReviewStatusCompleted, Round: 1},
+		{PaperID: paper.ID, ReviewerID: 33, Status: constants.ReviewStatusInvited, Round: 1, DueDate: &past},
+	}
+	for i := range seed {
+		if err := store.reviews.Create(ctx, &seed[i]); err != nil {
+			t.Fatalf("create review: %v", err)
+		}
+	}
+	if _, err := svc.FinalDecision(ctx, 2, paper.ID, dto.FinalDecisionRequest{
+		Decision: constants.PaperStatusAccepted,
+	}); err != nil {
+		t.Fatalf("final decision should pass after expiring overdue invite: %v", err)
+	}
+	expired, _ := store.reviews.FindByID(ctx, seed[2].ID)
+	if expired.Status != constants.ReviewStatusExpired {
+		t.Errorf("expected overdue invite expired, got %s", expired.Status)
 	}
 }
 

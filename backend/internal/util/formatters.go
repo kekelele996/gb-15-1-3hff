@@ -47,6 +47,8 @@ func FormatReviewStatus(status string) string {
 		return "已婉拒"
 	case constants.ReviewStatusCompleted:
 		return "已完成"
+	case constants.ReviewStatusExpired:
+		return "已超期"
 	default:
 		return status
 	}

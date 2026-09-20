@@ -26,6 +26,9 @@
         </template>
         <EmptyState v-if="!paper.reviews?.length" description="尚未分配审稿人" />
         <el-table v-else :data="paper.reviews" size="small" border>
+          <el-table-column label="轮次" width="80">
+            <template #default="{ row }">第{{ row.round || 1 }}轮</template>
+          </el-table-column>
           <el-table-column label="审稿人" width="140">
             <template #default="{ row }">{{ row.reviewer?.real_name || row.reviewer?.username || '-' }}</template>
           </el-table-column>
@@ -40,6 +43,9 @@
           </el-table-column>
           <el-table-column prop="comments" label="评审意见" show-overflow-tooltip />
           <el-table-column prop="confidential_comments" label="给编辑的保密意见" show-overflow-tooltip />
+          <el-table-column label="截止日期" width="150">
+            <template #default="{ row }">{{ formatTime(row.due_date) }}</template>
+          </el-table-column>
           <el-table-column label="完成时间" width="150">
             <template #default="{ row }">{{ formatTime(row.completed_at) }}</template>
           </el-table-column>
@@ -66,7 +72,33 @@
 
       <el-card shadow="never" class="mt-16">
         <template #header>终审决定</template>
-        <el-form label-width="90px" style="max-width: 640px">
+        <template v-if="summary">
+          <el-descriptions :column="5" border size="small" class="summary-bar">
+            <el-descriptions-item label="已完成">{{ summary.completed_reviewers }} 人</el-descriptions-item>
+            <el-descriptions-item label="待接受">{{ summary.invited }} 人</el-descriptions-item>
+            <el-descriptions-item label="审稿中">{{ summary.accepted }} 人</el-descriptions-item>
+            <el-descriptions-item label="已拒绝">{{ summary.declined }} 人</el-descriptions-item>
+            <el-descriptions-item label="已超期">{{ summary.expired }} 人</el-descriptions-item>
+          </el-descriptions>
+          <el-alert
+            v-if="!summary.can_finalize"
+            class="mt-16"
+            type="warning"
+            :closable="false"
+            title="暂不满足终审条件"
+            :description="`终审需至少 2 位审稿人完成评审且无待处理邀请：${summary.block_reasons.join('；')}`"
+            show-icon
+          />
+          <el-alert
+            v-else
+            class="mt-16"
+            type="success"
+            :closable="false"
+            title="外审进度已满足终审条件"
+            show-icon
+          />
+        </template>
+        <el-form label-width="90px" style="max-width: 640px" class="mt-16">
           <el-form-item label="决定">
             <el-radio-group v-model="decision">
               <el-radio value="accepted">录用</el-radio>
@@ -79,7 +111,7 @@
           <el-form-item>
             <el-button
               type="primary"
-              :disabled="!['initial_review', 'external_review', 'revision'].includes(paper.status)"
+              :disabled="!canSubmitDecision"
               :loading="decisionLoading"
               @click="submitDecision"
             >
@@ -92,6 +124,12 @@
   </div>
 
   <el-dialog v-model="assignVisible" title="追加审稿人" width="480px">
+    <el-alert
+      type="info"
+      :closable="false"
+      title="同一审稿人存在有效任务（待接受/审稿中）时不可重复邀请；已拒绝或已超期的审稿人可补邀"
+      style="margin-bottom: 12px"
+    />
     <el-select v-model="assignReviewerId" placeholder="选择审稿人" style="width: 100%">
       <el-option v-for="r in reviewers" :key="r.id" :label="`${r.real_name}（${r.username}）`" :value="r.id" />
     </el-select>
@@ -103,12 +141,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { assignReviewer } from '../../api/review'
+import { assignReviewer, getReviewSummary } from '../../api/review'
 import { finalDecision, getPaper, getPlagiarism, listReviewers, rerunPlagiarism as rerunApi } from '../../api/paper'
-import type { Paper, PlagiarismResult } from '../../api/types'
+import type { Paper, PlagiarismResult, ReviewSummary } from '../../api/types'
 import EmptyState from '../../components/EmptyState.vue'
 import PaperInfoCard from '../../components/PaperInfoCard.vue'
 import StatusBadge from '../../components/StatusBadge.vue'
@@ -122,10 +160,17 @@ const assignLoading = ref(false)
 const assignVisible = ref(false)
 const paper = ref<Paper | null>(null)
 const plagiarism = ref<PlagiarismResult | null>(null)
+const summary = ref<ReviewSummary | null>(null)
 const reviewers = ref<Array<{ id: number; real_name: string; username: string }>>([])
 const decision = ref('accepted')
 const comment = ref('')
 const assignReviewerId = ref(0)
+
+const canSubmitDecision = computed(() => {
+  if (!paper.value) return false
+  if (!['initial_review', 'external_review', 'revision'].includes(paper.value.status)) return false
+  return summary.value?.can_finalize === true
+})
 
 async function load() {
   const id = route.params.id as string
@@ -133,6 +178,7 @@ async function load() {
   try {
     paper.value = await getPaper(id)
     plagiarism.value = await getPlagiarism(id)
+    summary.value = await getReviewSummary(id)
   } catch {
     // 拦截器已提示
   } finally {
@@ -193,5 +239,8 @@ onMounted(async () => {
 <style scoped>
 .mb {
   margin-bottom: 4px;
+}
+.summary-bar {
+  max-width: 720px;
 }
 </style>

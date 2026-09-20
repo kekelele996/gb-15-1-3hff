@@ -55,6 +55,20 @@ func (h *ReviewHandler) ListByPaper(c *gin.Context) {
 	util.OK(c, items)
 }
 
+// ReviewSummary 论文外审进度汇总（编辑终审页：各状态人数与终审门槛判定）。
+func (h *ReviewHandler) ReviewSummary(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	summary, err := h.reviewSvc.Summarize(c.Request.Context(), id)
+	if err != nil {
+		h.wrapError(c, err)
+		return
+	}
+	util.OK(c, summary)
+}
+
 // Respond 接受/拒绝审稿邀请（审稿人）。
 func (h *ReviewHandler) Respond(c *gin.Context) {
 	id, ok := parseID(c)

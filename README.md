@@ -37,11 +37,12 @@ docker compose down -v --remove-orphans
 
 1. **作者投稿管理**：注册登录后创建投稿，上传 PDF/Word 论文文件，填写标题、摘要、关键词、学科分类、作者与单位，跟踪投稿状态（已提交→初审中→外审中→修改中→已录用/已拒稿）。
 2. **编辑部初审**：编辑检查格式与选题，通过后分配给审稿人，不通过退回作者并附理由。
-3. **同行评审管理**：审稿人接受/拒绝邀请，接受后按截止日期提交评审意见（录用/小修后录用/大修后重审/拒稿），支持匿名双盲（给编辑的保密意见仅编辑可见）。
-4. **修稿与反馈**：作者按审稿意见修改并重新提交，上传逐条回复的修改说明，多轮迭代。
-5. **查重检测**：投稿自动触发查重，展示重复率与重复段落标注，超过 30% 自动退回。
-6. **论文库与检索**：已录用论文进入论文库，支持按标题/摘要/关键词/学科检索。
-7. **数据统计**：编辑统计面板——投稿量趋势、学科分布、平均审稿周期、录用率、审稿人工作量排名。
+3. **同行评审管理**：外审可邀请多位审稿人；审稿人接受/拒绝邀请，接受后按截止日期提交评审意见（录用/小修后录用/大修后重审/拒稿），支持匿名双盲（给编辑的保密意见仅编辑可见）。邀请被拒绝或超过截止日期后旧记录失效（已超期），编辑可补邀；同一审稿人不能同时存在两条有效任务，已失效的旧任务不得再回应。
+4. **修稿与反馈**：作者按审稿意见修改并重新提交，上传逐条回复的修改说明；提交修改稿时按仍在有效期内的审稿人自动开启新一轮匿名评审，旧轮次意见只读保留并按轮次展示完成进度，支持多轮迭代。
+5. **终审门槛**：编辑只有在完成评审的有效审稿人不少于 2 人、且没有待接受邀请与审稿中任务时才能终审；终审页实时显示已完成、待接受、审稿中、已拒绝、已超期人数，条件不足时阻止提交并提示原因。
+6. **查重检测**：投稿自动触发查重，展示重复率与重复段落标注，超过 30% 自动退回。
+7. **论文库与检索**：已录用论文进入论文库，支持按标题/摘要/关键词/学科检索。
+8. **数据统计**：编辑统计面板——投稿量趋势、学科分布、平均审稿周期、录用率、审稿人工作量排名。
 
 ## 本地开发（备选）
 
@@ -159,9 +160,10 @@ gb-15-1/
 | --- | --- | --- | --- |
 | GET | /reviews/mine?status= | 我的审稿任务 | 审稿人/管理员 |
 | GET | /reviews/paper/:paperID | 论文审稿记录 | 登录 |
-| POST | /reviews/:id/respond | 接受/拒绝邀请 | 审稿人本人 |
-| POST | /reviews/:id/submit | 提交评审意见 | 审稿人本人 |
-| POST | /papers/:id/reviewers | 追加分配审稿人 | 编辑/管理员 |
+| POST | /reviews/:id/respond | 接受/拒绝邀请（超期任务不可回应） | 审稿人本人 |
+| POST | /reviews/:id/submit | 提交评审意见（超期任务不可提交） | 审稿人本人 |
+| POST | /papers/:id/reviewers | 追加/补邀审稿人（有效任务唯一） | 编辑/管理员 |
+| GET | /papers/:id/review-summary | 外审进度汇总与终审门槛判定 | 编辑/管理员 |
 
 ### 查重 / 文件 / 统计 / 审计
 
@@ -182,6 +184,7 @@ gb-15-1/
 - `GET /papers/mine`、`GET /papers`、`GET /library/papers` 三个接口复用 `PaperService.list` 与 `PaperRepository.List`（同一 repository 方法）。
 - 「论文创建自动查重」与 `POST /papers/:id/plagiarism/rerun` 复用 `PlagiarismService.RunCheck`（同一 service 方法）。
 - `POST /papers/:id/initial-review` 与 `POST /papers/:id/reviewers` 复用 `ReviewRepository.Create` 创建审稿邀请。
+- `GET /reviews/paper/:paperID`、`GET /papers/:id/review-summary` 与终审门槛判定复用 `ReviewRepository.ListByPaper` 与惰性过期清扫 `ReviewRepository.ExpireOverdue`（同一 repository 方法）。
 
 ### curl 调用示例（含 JWT）
 
@@ -247,16 +250,18 @@ curl -sS http://localhost:3009/healthz
 - 前端 constants：`frontend/src/constants/index.ts`（PAPER_STATUS_MAP / PAPER_STATUS_ORDER）
 - 前端组件/页面：`frontend/src/components/StatusBadge.vue`、`frontend/src/components/PaperStatusSteps.vue`、`frontend/src/pages/author/PaperList.vue`、`frontend/src/pages/editor/InitialReview.vue`
 
-### 3. 审稿状态 ReviewStatus（invited / accepted / declined / completed）
+### 3. 审稿状态 ReviewStatus（invited / accepted / declined / completed / expired）
 
-- 后端 model：`backend/internal/model/review.go`
-- 后端 constants：`backend/internal/constants/review_status.go`
-- 后端 service 状态机：`backend/internal/service/review_service.go`（Respond/Submit）
-- 后端 repository：`backend/internal/repository/review_repository.go`（CountCompleted）
+- 后端 model：`backend/internal/model/review.go`（含 round 评审轮次字段）
+- 后端 constants：`backend/internal/constants/review_status.go`（含 ReviewActiveStatuses 有效任务集合与 FinalDecisionMinCompletedReviewers 终审门槛）
+- 后端 service 状态机：`backend/internal/service/review_service.go`（Respond/Submit/Assign/Summarize 与过期清扫）、`backend/internal/service/paper_service.go`（Revise 开启新一轮评审、FinalDecision 终审门槛）
+- 后端 repository：`backend/internal/repository/review_repository.go`（ExpireOverdue 过期清扫、FindActiveByPaperReviewer 有效任务查重、CountCompleted）
+- 后端 DTO：`backend/internal/dto/review_dto.go`（ReviewQuery oneof 校验、ReviewSummary 汇总）
+- 后端 handler：`backend/internal/handler/review_handler.go`（ReviewSummary）
 - 后端 formatters：`backend/internal/util/formatters.go`（FormatReviewStatus）
-- 后端日志模板：`backend/internal/constants/log_templates.go`（LogReviewRespond、LogReviewSubmit）
+- 后端日志模板：`backend/internal/constants/log_templates.go`（LogReviewRespond、LogReviewSubmit、LogReviewExpireSweep、LogReviewNewRound、LogReviewSummary）
 - 前端 constants：`frontend/src/constants/index.ts`（REVIEW_STATUS_MAP）
-- 前端页面：`frontend/src/pages/reviewer/MyReviews.vue`、`frontend/src/pages/editor/PaperManage.vue`
+- 前端页面：`frontend/src/pages/reviewer/MyReviews.vue`、`frontend/src/pages/reviewer/ReviewDetail.vue`、`frontend/src/pages/editor/PaperManage.vue`（终审页人数统计与门槛拦截）、`frontend/src/pages/author/PaperDetail.vue`（分轮次进度展示）
 
 ### 4. 评审等级 ReviewDecision（accept / minor_revision / major_revision / reject）
 

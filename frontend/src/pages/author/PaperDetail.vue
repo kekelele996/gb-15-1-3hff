@@ -41,21 +41,28 @@
       <el-card shadow="never" class="mt-16">
         <template #header>审稿意见</template>
         <EmptyState v-if="!paper.reviews?.length" description="暂无审稿记录" />
-        <el-timeline v-else>
-          <el-timeline-item
-            v-for="r in paper.reviews"
-            :key="r.id"
-            :timestamp="formatTime(r.created_at)"
-            placement="top"
-          >
-            <p>
-              <strong>{{ r.reviewer?.real_name || r.reviewer?.username || '审稿人' }}</strong>
-              <StatusBadge :status="r.status" kind="review" style="margin-left: 8px" />
-              <StatusBadge v-if="r.decision" :status="r.decision" kind="decision" style="margin-left: 8px" />
-            </p>
-            <p class="comment">{{ r.comments || '（暂未提交意见）' }}</p>
-          </el-timeline-item>
-        </el-timeline>
+        <div v-else>
+          <div v-for="g in reviewRounds" :key="g.round">
+            <el-divider content-position="left">
+              第 {{ g.round }} 轮审稿（已完成 {{ g.completed }}/{{ g.items.length }}）
+            </el-divider>
+            <el-timeline>
+              <el-timeline-item
+                v-for="r in g.items"
+                :key="r.id"
+                :timestamp="formatTime(r.created_at)"
+                placement="top"
+              >
+                <p>
+                  <strong>{{ r.reviewer?.real_name || r.reviewer?.username || '审稿人' }}</strong>
+                  <StatusBadge :status="r.status" kind="review" style="margin-left: 8px" />
+                  <StatusBadge v-if="r.decision" :status="r.decision" kind="decision" style="margin-left: 8px" />
+                </p>
+                <p class="comment">{{ r.comments || '（暂未提交意见）' }}</p>
+              </el-timeline-item>
+            </el-timeline>
+          </div>
+        </div>
       </el-card>
 
       <el-card shadow="never" class="mt-16">
@@ -89,7 +96,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getPaper, getPlagiarism } from '../../api/paper'
-import type { Paper, PlagiarismResult } from '../../api/types'
+import type { Paper, PlagiarismResult, ReviewItem } from '../../api/types'
 import EmptyState from '../../components/EmptyState.vue'
 import PaperInfoCard from '../../components/PaperInfoCard.vue'
 import PaperStatusSteps from '../../components/PaperStatusSteps.vue'
@@ -101,6 +108,23 @@ const router = useRouter()
 const loading = ref(false)
 const paper = ref<Paper | null>(null)
 const plagiarism = ref<PlagiarismResult | null>(null)
+
+// 按轮次分组审稿记录：旧轮次意见只读保留，并展示每轮完成进度。
+const reviewRounds = computed(() => {
+  const rounds = new Map<number, ReviewItem[]>()
+  for (const r of paper.value?.reviews || []) {
+    const key = r.round || 1
+    if (!rounds.has(key)) rounds.set(key, [])
+    rounds.get(key)!.push(r)
+  }
+  return [...rounds.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([round, items]) => ({
+      round,
+      items: [...items].sort((a, b) => a.id - b.id),
+      completed: items.filter((i) => i.status === 'completed').length
+    }))
+})
 
 const reportItems = computed(() => {
   if (!plagiarism.value?.report) return []

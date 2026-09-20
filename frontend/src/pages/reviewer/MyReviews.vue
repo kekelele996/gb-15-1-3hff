@@ -13,6 +13,9 @@
       <el-table-column label="论文" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">{{ row.paper?.title || `论文 #${row.paper_id}` }}</template>
       </el-table-column>
+      <el-table-column label="轮次" width="80">
+        <template #default="{ row }">第{{ row.round || 1 }}轮</template>
+      </el-table-column>
       <el-table-column label="学科" width="120">
         <template #default="{ row }">{{ subjectText(row.paper?.subject || '') }}</template>
       </el-table-column>
@@ -57,7 +60,7 @@
       v-model:page-size="pagination.size.value"
       :total="pagination.total.value"
       layout="total, prev, pager, next"
-      @current-change="() => pagination.load({ status: status.value })"
+      @current-change="() => pagination.load({ status })"
       class="pager"
     />
   </el-card>

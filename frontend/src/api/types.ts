@@ -37,12 +37,26 @@ export interface ReviewItem {
   reviewer_id: number
   reviewer?: UserSummary
   status: string
+  round: number
   decision: string
   comments: string
   confidential_comments: string
   due_date: string
   completed_at: string
   created_at: string
+}
+
+export interface ReviewSummary {
+  paper_id: number
+  round: number
+  completed: number
+  completed_reviewers: number
+  invited: number
+  accepted: number
+  declined: number
+  expired: number
+  can_finalize: boolean
+  block_reasons: string[]
 }
 
 export interface RevisionItem {

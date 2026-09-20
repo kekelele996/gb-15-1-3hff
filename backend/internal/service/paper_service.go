@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/paperflow/paperflow/internal/config"
 	"github.com/paperflow/paperflow/internal/constants"
@@ -181,6 +182,7 @@ func (s *PaperService) InitialReview(ctx context.Context, editorID uint, paperID
 			PaperID:    paper.ID,
 			ReviewerID: reviewer.ID,
 			Status:     constants.ReviewStatusInvited,
+			Round:      paper.Version,
 			DueDate:    &due,
 		}
 		if err := tx.ReviewRepository().Create(ctx, invite); err != nil {
@@ -201,8 +203,10 @@ func (s *PaperService) InitialReview(ctx context.Context, editorID uint, paperID
 }
 
 // FinalDecision 终审决定：录用或拒稿。
+// 终审门槛：完成评审的有效审稿人不少于 2 人，且没有待接受邀请与审稿中任务，否则阻止提交。
 func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID uint, req dto.FinalDecisionRequest) (*model.Paper, error) {
 	err := s.store.Transaction(ctx, func(tx repository.Store) error {
+		expireOverdueReviews(ctx, tx.ReviewRepository(), s.logger)
 		paper, err := tx.PaperRepository().FindByIDForUpdate(ctx, paperID)
 		if err != nil {
 			return err
@@ -213,6 +217,16 @@ func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID
 			return util.NewAppError(constants.ErrPaperStatusNotAllowed,
 				fmt.Sprintf("终审失败：论文 %s 当前状态 %s 不允许终审",
 					paper.Title, util.FormatPaperStatus(paper.Status)), nil)
+		}
+		reviews, err := tx.ReviewRepository().ListByPaper(ctx, paperID)
+		if err != nil {
+			return util.NewAppError(constants.ErrInternal, "终审失败：查询审稿记录时系统内部错误", err)
+		}
+		summary := buildReviewSummary(paperID, paper.Version, reviews)
+		if !summary.CanFinalize {
+			return util.NewAppError(constants.ErrReviewNotAllowed,
+				fmt.Sprintf("终审失败：论文 %s 外审进度不足（%s）",
+					paper.Title, strings.Join(summary.BlockReasons, "；")), nil)
 		}
 		paper.Status = req.Decision
 		paper.FinalDecision = req.Decision
@@ -234,8 +248,11 @@ func (s *PaperService) FinalDecision(ctx context.Context, editorID uint, paperID
 }
 
 // Revise 作者修稿重投：事务内写修稿记录并推进论文版本与状态。
+// 同时按仍在有效期内的审稿人开启新一轮匿名评审：旧的有效任务（待接受/审稿中）失效，
+// 已完成的旧意见只读保留，为上述审稿人创建新一轮邀请；已拒绝/已超期的审稿人不自动续邀，编辑可补邀。
 func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, req dto.ReviseRequest) (*model.Paper, error) {
 	err := s.store.Transaction(ctx, func(tx repository.Store) error {
+		expireOverdueReviews(ctx, tx.ReviewRepository(), s.logger)
 		paper, err := tx.PaperRepository().FindByIDForUpdate(ctx, paperID)
 		if err != nil {
 			return err
@@ -264,6 +281,11 @@ func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, 
 		if err := tx.PaperRepository().Update(ctx, paper); err != nil {
 			return err
 		}
+		invites, err := s.openNewReviewRound(ctx, tx, paperID, version)
+		if err != nil {
+			return err
+		}
+		s.logger.Info(fmt.Sprintf(constants.LogReviewNewRound, paperID, version, invites))
 		return nil
 	})
 	if err != nil {
@@ -279,4 +301,49 @@ func (s *PaperService) Revise(ctx context.Context, authorID uint, paperID uint, 
 	}
 	s.logger.Info(fmt.Sprintf(constants.LogReviseSubmit, paperID, paper.Version))
 	return paper, nil
+}
+
+// openNewReviewRound 修稿后为仍在有效期内的审稿人开启新一轮匿名评审，返回新建邀请数。
+// 每个审稿人取其最新一条任务判定：待接受/审稿中/已完成视为仍在有效期内，为其创建新一轮邀请；
+// 待接受/审稿中的旧任务同时失效（同一审稿人不能同时存在两条有效任务）；已拒绝/已超期不续邀。
+func (s *PaperService) openNewReviewRound(ctx context.Context, tx repository.Store, paperID uint, version int) (int, error) {
+	reviews, err := tx.ReviewRepository().ListByPaper(ctx, paperID)
+	if err != nil {
+		return 0, util.NewAppError(constants.ErrInternal, "修稿失败：查询审稿记录时系统内部错误", err)
+	}
+	latest := map[uint]*model.Review{}
+	for i := range reviews {
+		r := reviews[i]
+		if old, ok := latest[r.ReviewerID]; !ok || r.ID > old.ID {
+			rr := r
+			latest[r.ReviewerID] = &rr
+		}
+	}
+	invites := 0
+	for _, r := range latest {
+		switch r.Status {
+		case constants.ReviewStatusInvited, constants.ReviewStatusAccepted:
+			r.Status = constants.ReviewStatusExpired
+			if err := tx.ReviewRepository().Update(ctx, r); err != nil {
+				return 0, util.NewAppError(constants.ErrInternal, "修稿失败：失效旧审稿任务时系统内部错误", err)
+			}
+		case constants.ReviewStatusCompleted:
+			// 已完成的旧意见只读保留，无需变更。
+		default:
+			continue
+		}
+		due := timeNow().AddDate(0, 0, 14)
+		invite := &model.Review{
+			PaperID:    paperID,
+			ReviewerID: r.ReviewerID,
+			Status:     constants.ReviewStatusInvited,
+			Round:      version,
+			DueDate:    &due,
+		}
+		if err := tx.ReviewRepository().Create(ctx, invite); err != nil {
+			return 0, util.NewAppError(constants.ErrInternal, "修稿失败：创建新一轮审稿邀请时系统内部错误", err)
+		}
+		invites++
+	}
+	return invites, nil
 }

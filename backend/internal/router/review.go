@@ -14,4 +14,5 @@ func RegisterReviewRoutes(g *gin.RouterGroup, h *handler.ReviewHandler) {
 	g.POST("/reviews/:id/respond", middleware.RequireRoles(constants.RoleReviewer, constants.RoleAdmin), h.Respond)
 	g.POST("/reviews/:id/submit", middleware.RequireRoles(constants.RoleReviewer, constants.RoleAdmin), h.Submit)
 	g.POST("/papers/:id/reviewers", middleware.RequireRoles(constants.RoleEditor, constants.RoleAdmin), h.Assign)
+	g.GET("/papers/:id/review-summary", middleware.RequireRoles(constants.RoleEditor, constants.RoleAdmin), h.ReviewSummary)
 }

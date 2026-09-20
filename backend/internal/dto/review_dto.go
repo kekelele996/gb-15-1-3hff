@@ -14,7 +14,21 @@ type SubmitReviewRequest struct {
 
 // ReviewQuery 审稿列表查询参数。
 type ReviewQuery struct {
-	Status string `form:"status" binding:"omitempty,oneof=invited accepted declined completed"`
+	Status string `form:"status" binding:"omitempty,oneof=invited accepted declined completed expired"`
 	Page   int    `form:"page" binding:"omitempty,min=1"`
 	Size   int    `form:"size" binding:"omitempty,min=1,max=100"`
+}
+
+// ReviewSummary 论文外审进度汇总（终审页展示与终审门槛判定）。
+type ReviewSummary struct {
+	PaperID            uint     `json:"paper_id"`
+	Round              int      `json:"round"`
+	Completed          int      `json:"completed"`
+	CompletedReviewers int      `json:"completed_reviewers"`
+	Invited            int      `json:"invited"`
+	Accepted           int      `json:"accepted"`
+	Declined           int      `json:"declined"`
+	Expired            int      `json:"expired"`
+	CanFinalize        bool     `json:"can_finalize"`
+	BlockReasons       []string `json:"block_reasons"`
 }
